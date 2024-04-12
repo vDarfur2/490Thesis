@@ -1,4 +1,5 @@
 import ffmpeg
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 frameWidth = 3840
@@ -104,6 +105,11 @@ def create_file_list(frame_number, num_tiles=144):
         for i in range(num_tiles):
             f.write(f"file 'output_tiles/temp_{i:03d}_{frame_number:04d}.png'\n")
 
+def process_frame(frame_number, file_path):
+    frame_quality_dict = assign_tile_quality(get_tiles_quality_by_frame_id(frame_number, file_path))
+    apply_quality_to_tiles(frame_number, frame_quality_dict)
+    restitch_frames(frame_number)
+
 def restitch_frames(frame_number):
     num_tiles = 144
     # Create the file list
@@ -129,15 +135,12 @@ def main():
     
     file_path = 'v8/play_log_2024-04-04_03_43_21.txt'
     # Iterate over each frame
-    for frame_number in range(1, total_frames + 1):
-        frame_quality_dict = assign_tile_quality(get_tiles_quality_by_frame_id(frame_number, file_path))
-        # Assign quality values for tiles in the current frame
-
-        # Apply quality values to tiles in the current frame
-        apply_quality_to_tiles(frame_number, frame_quality_dict)
-
-        # Restitch the tiled frames back into a video
-        restitch_frames(frame_number)
+    total_frames = 1500
+    # Using ThreadPoolExecutor to parallelize frame processing
+    with ThreadPoolExecutor(max_workers=4) as executor:  # Adjust max_workers based on your system's capabilities
+        futures = [executor.submit(process_frame, frame_number, file_path) for frame_number in range(1, total_frames + 1)]
+        for future in as_completed(futures):
+            future.result()
 
     # Create the output video from stitched frames
     create_output_video()
