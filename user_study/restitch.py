@@ -1,21 +1,21 @@
 import ffmpeg
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
-
-frameWidth = 3840
-frameHeight = 2048
+frameWidth = 3840 # for frameWidth and frameHeight adjust based on video dimensions
+frameHeight = 1920
 widthTiles = 12
 heightTiles = 12
-total_frames = 1500  # Assuming a 1-minute video at 25 fps
+total_frames = 1475 # adjust based on frames in your processed video
 num_tiles_x = 12
 num_tiles_y = 12
 
 tile_width = frameWidth / widthTiles
 tile_height = frameHeight / heightTiles
+file_lock = threading.Lock()
 
-
-# Mapping from quality in play log to  
-qp_dict = {0: 17, 1:22, 2:27, 3:32, 4:37, 5:42, 6:50}
+# Mapping from quality in play log to  qp value
+qp_dict = {0: 42, 2:37, 3:32, 4:27, 5:22}
 
 def get_tiles_quality_by_frame_id(frame_id, file_path):
     with open(file_path, 'r') as file:
@@ -30,22 +30,6 @@ def get_tiles_quality_by_frame_id(frame_id, file_path):
 
     return None
 
-
-# Tiles available at a frame
-def tiles_in_frame(frame_trace_file):
-    tile_dict = {}
-    with open(frame_trace_file, 'r') as file:
-        for line in file:
-            elements = line.strip().split()
-
-            frame_id = int(elements[0])
-            # The remaining elements represent tiles in the frame
-            tiles = elements[2:]
-            # Store the tiles in the dictionary with the frame ID as the key
-            tile_dict[frame_id] = tiles
-
-    return tile_dict
-
 # Given tiles quality list, create a dictionary that maps a tile_id to a tile quality
 def assign_tile_quality(tiles_quality):
     vp_quality_dict = {}
@@ -54,32 +38,36 @@ def assign_tile_quality(tiles_quality):
     for tq in vp_tile_quality_list:
         tile, quality = tq.split('_')
         tile = int(tile)
+        if tile == 0:
+            continue
         quality = int(quality)
-        vp_quality_dict[xy_dict[tile]] = qp_dict[quality]
+        temp = xy_dict[tile]
+        vp_quality_dict[temp] = qp_dict[quality]
     
     quality_dict = {}
-    for i in range(0, widthTiles):
-        for j in range(0, heightTiles):
+    for i in range(1, widthTiles+1):
+        for j in range(1, heightTiles+1):
             if (i, j) in vp_quality_dict:
                 quality_dict[(i,j)] = vp_quality_dict[(i,j)]
             else:
                 quality_dict[(i,j)] = qp_dict[0]
    
     quality_dict = dict(sorted(quality_dict.items(), key=lambda item: item[0][1]))
-   
+    
     return quality_dict
 
-
+# For all tiles in frame, gets tile of the quality defined for that tile in the frame_quality_dict
 def apply_quality_to_tiles(frame_number, frame_quality_dict):
-    # Iterate over each tile in the frame and assign the quality value
-    index = 0
-    
+    index = 1
+
     for tile_coords, quality_value in frame_quality_dict.items():
         x, y = tile_coords
+        x -= 1
+        y -= 1
         # Define the crop filter to extract the specific tile
         crop_filter = 'crop={w}:{h}:{x}:{y}'.format(w=tile_width, h=tile_height, x=x * tile_width, y=y * tile_height)
         # Use FFmpeg to create a tile with the assigned quality value
-        input_filename = 'v8/%d_frames/frame_%04d.png' % (quality_value, frame_number)
+        input_filename = 'v27/%d_frames/frame_%04d.png' % (quality_value, frame_number)
         output_filename = 'output_tiles/temp_%03d_%04d.png' % (index, frame_number)
         ffmpeg.input(input_filename)\
             .output(output_filename, vf=crop_filter, loglevel="quiet")\
@@ -90,20 +78,22 @@ def apply_quality_to_tiles(frame_number, frame_quality_dict):
 
 # Map tile IDs to x,y Coordinates
 def tile_id_to_xy(widthTiles, heightTiles):
-    tile_id = 0
+    tile_id = 1
     tile_dict = {}
-    for i in range(0, widthTiles):
-        for j in range(0, heightTiles):
+    for i in range(1, widthTiles+1):
+        for j in range(1, heightTiles+1):
             tile_dict[tile_id] = (j ,i)
             tile_id += 1
 
     return tile_dict
 
 # File list for ffmpeg stitching
-def create_file_list(frame_number, num_tiles=144):
-    with open('input_files.txt', 'w') as f:
-        for i in range(num_tiles):
-            f.write(f"file 'output_tiles/temp_{i:03d}_{frame_number:04d}.png'\n")
+def create_file_list(frame_number):
+    num_tiles = 144
+    with file_lock:
+        with open(f'input_files/input_files_{frame_number:04d}.txt', 'w') as f:
+            for i in range(1, num_tiles+1):
+                f.write(f"file '../output_tiles/temp_{i:03d}_{frame_number:04d}.png'\n")
 
 def process_frame(frame_number, file_path):
     frame_quality_dict = assign_tile_quality(get_tiles_quality_by_frame_id(frame_number, file_path))
@@ -113,40 +103,27 @@ def process_frame(frame_number, file_path):
 def restitch_frames(frame_number):
     num_tiles = 144
     # Create the file list
-    create_file_list(frame_number, num_tiles)
-    
-    # Command to stitch images using the tile filter
+    create_file_list(frame_number)   
     (
         ffmpeg
-        .input('input_files.txt', format='concat', safe=0)
+        .input(f'input_files/input_files_{frame_number:04d}.txt', format='concat', safe=0)
         .filter('tile', layout='12x12')
-        .output(f'output_frames/final_frame_{frame_number:04d}.png', loglevel="quiet")
+        .output(f'output_frames_tcp_v27/final_frame_{frame_number:04d}.png')
         .run()
     )
 
-
-
-
-def create_output_video():
-    # Create the output video from stitched frames
-    ffmpeg.input('output_frames/stitched_%04d.png', framerate=25).output('output_video.mp4', codec='libx264').run()
-
 def main():
     
-    file_path = 'v8/play_log_2024-04-04_03_43_21.txt'
-    # Iterate over each frame
-    total_frames = 1500
+    file_path = 'v14/mptcp_play_log.txt'
+    protocol = sys.argv[1]
     # Using ThreadPoolExecutor to parallelize frame processing
-    with ThreadPoolExecutor(max_workers=4) as executor:  # Adjust max_workers based on your system's capabilities
+    with ThreadPoolExecutor(max_workers=12) as executor:  # Adjust max_workers based on your system's capabilities
         futures = [executor.submit(process_frame, frame_number, file_path) for frame_number in range(1, total_frames + 1)]
         for future in as_completed(futures):
             future.result()
 
-    # Create the output video from stitched frames
-    create_output_video()
-
-
-
 
 if __name__ == "__main__":
     main()
+
+
